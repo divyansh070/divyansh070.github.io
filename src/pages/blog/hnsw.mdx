@@ -1,0 +1,211 @@
+---
+layout: ../../layouts/Post.astro
+title: "HNSW, by playing with it"
+description: "How vector databases find nearest neighbours without checking every vector, built up from first principles. Every idea comes with a demo you can click."
+---
+import BruteForce from '../../components/hnsw/BruteForce.astro';
+import GreedyGraph from '../../components/hnsw/GreedyGraph.astro';
+import Layers3D from '../../components/hnsw/Layers3D.astro';
+import BuildDemo from '../../components/hnsw/BuildDemo.astro';
+import NeighbourSelect from '../../components/hnsw/NeighbourSelect.astro';
+import Playground from '../../components/hnsw/Playground.astro';
+
+Every time you ask a chatbot about your own documents, a nearest-neighbour search runs behind the scenes. Your question becomes a vector (an embedding), every chunk of every document is already a vector, and the system needs the few chunks whose vectors sit closest to yours. Recommendation feeds, reverse image search and duplicate detection all ask the same question: *given a point, which stored points are nearest to it?*
+
+The most widely used answer is a graph called HNSW, short for Hierarchical Navigable Small World. This post builds it from nothing, one idea at a time, and every idea fixes a problem the previous one left behind. Every demo runs a real HNSW implementation in your browser, about 150 lines of JavaScript, so you can poke it and watch what happens.
+
+## The problem
+
+An embedding is a list of numbers, often a few hundred or a few thousand of them. Two embeddings are "close" when the distance between them is small. The usual choices are Euclidean distance (straight-line distance) and cosine distance (the angle between the vectors). Nothing in HNSW depends on which one you pick, as long as you can compute it.
+
+High-dimensional space is impossible to draw, so every demo in this post uses points on a flat 2-D plane. All the ideas carry over to 768 dimensions unchanged. Only the pictures get harder to draw.
+
+## The slow, correct answer
+
+The obvious way to find the nearest neighbour is to measure the distance from the query to every point and keep the smallest. Click anywhere below to try it.
+
+<BruteForce n={400} k={5} />
+
+Watch the counter. Brute force always does one distance computation per stored vector. 400 points is nothing, but a production index can hold 100 million embeddings with 768 dimensions each, which is about 77 billion multiply-adds for a single query.
+
+The whole game is to make that counter small. Classic tricks like k-d trees, which split space into boxes, work well in two or three dimensions and fall apart in hundreds, where almost every box ends up needing a check. So vector search usually gives up on being exact. It aims to return the true nearest neighbours most of the time, measured by **recall@k**: of the true k nearest neighbours, what fraction did the search return? A recall of 0.95 for a hundredth of the work is a great trade for most applications.
+
+## Idea 1: walk a graph
+
+Here's a different way to think about searching. Suppose every point is linked to a few points near it. To answer a query, start anywhere and keep hopping to whichever neighbour is closest to the query. When none of your neighbours is closer than where you're standing, stop. This is **greedy search**, and it's how you'd find a house in an unfamiliar town: ask for directions, walk a bit, ask again.
+
+Why should this work at all? If the links connect nearby points, then from almost anywhere there's a neighbour that sits a bit further in the query's direction, so each hop makes progress. You never look at points far away from the path, which is where the savings come from.
+
+Below, the points were inserted one at a time, each linked to the M closest points it could find. Click to send a query. Blue lines are neighbours the search measured, and red lines are the hops it took.
+
+<GreedyGraph n={250} />
+
+With M at 1 or 2, try a few queries and you'll see searches stop in the wrong place. The red node is a **local minimum**: none of its neighbours is closer to the query, but the true answer (green ring) is somewhere else. Reaching it would mean first stepping *away* from the query, and greedy search never does that. Turn M up and the misses mostly disappear, because more links mean more routes around gaps. But every hop now measures more neighbours, so each query costs more.
+
+Watch a little longer and a second problem shows up. Searches that start far from the query need many hops, because short local links only move you a little at a time. On a graph of a billion points, that walk gets long.
+
+There's a partial fix hiding in this demo. The first points inserted were linked while the graph was nearly empty, so some of their "nearest" neighbours were far away and their links are long. Those accidental long links act as shortcuts across the map. A graph with mostly short links plus a few long ones, which lets you cross it in a handful of hops, is called a **navigable small world**. This flat version is NSW, the algorithm that came before HNSW.
+
+The weakness of NSW is that its shortcuts are an accident of insertion order. HNSW makes them deliberate.
+
+## Idea 2: zoom levels
+
+Think about how you'd give directions across a country. You don't list every street. You say: take the motorway to the right city, then the main road to the right neighbourhood, then the streets to the house. Each level of the journey uses a coarser map than the one after it.
+
+HNSW builds those maps out of the same points. Every point lives on **layer 0**, the bottom layer. A random fraction of them, about 1 in M, are *also* copied onto layer 1. About 1 in M of those are copied onto layer 2, and so on, until only a single point remains at the top. Each layer is its own graph, linking each of its points to nearby points *from the same layer*.
+
+That's the key thing to understand about each layer: **it's the same kind of graph, just over fewer points.** Because layer 2 has so few points, a point's nearest neighbours on layer 2 are far away, so its links are long. On layer 0, every point is present, so the nearest neighbours are close and the links are short. The upper layers are the motorways and layer 0 is the streets.
+
+To get a feel for the numbers, take 1 million points with M = 16. Layer 0 holds all million, layer 1 about 62,500, layer 2 about 3,900, layer 3 about 240, layer 4 about 15, and layer 5 about one. Six layers cover a million points, and every extra factor of 16 in data size adds only one more layer.
+
+If you've seen a skip list, this is the same trick: a sorted list with sparser "express" lists stacked on top, where you run along the top list, drop down when you'd overshoot, and repeat.
+
+## Walking down the layers
+
+A search uses the layers from the top down:
+
+1. Start at the **entry point**, the single point on the top layer.
+2. Do greedy search on the current layer: hop to closer neighbours until none is closer.
+3. Take the point you stopped at, drop down to the layer below (it's there too, since every point on a layer is also on all layers below), and repeat step 2 from it.
+4. On layer 0, search more carefully, keeping several candidates instead of one, and return the best.
+
+Each layer hands the next one a good starting point. The motorway gets you to the right city, so the street-level search only has to go a few blocks.
+
+The demo below shows the same 300 points as five stacked layers. Drag to rotate it. Press **Next step** to walk through a search one decision at a time: the text explains what is measured and why the search moves, drops, or stops. The green point is where each layer's search starts, blue lines are distances measured, and red lines are hops.
+
+<Layers3D n={300} />
+
+Run a few queries with ef at 1 first. Notice how the hops on the upper layers are long, and how few of them there are. By the time the search reaches layer 0, it's usually already within a hop or two of the answer. Sometimes, though, plain greedy search on layer 0 stops one hop short, and the walkthrough will tell you it missed. That's what ef is for.
+
+## What ef does on layer 0
+
+On the upper layers the search only needs to be roughly right, so greedy search with a single "current best" point is enough. On layer 0 it needs to be precise, so HNSW widens the search into a **beam search** controlled by a number called `ef`. It keeps two lists:
+
+- **candidates**: points it has measured but not yet explored, closest first.
+- **results**: the `ef` closest points measured so far.
+
+Then it loops: take the closest unexplored candidate. If it's further away than the worst point in results, stop, because exploring it (and everything behind it) can't improve the results. Otherwise, measure each of its unvisited neighbours, and add any neighbour that beats the worst result to both lists.
+
+With `ef = 1` this is exactly greedy search. With a larger `ef`, the search can explore a point that isn't the best so far, which is how it steps out of a local minimum. Go back to the 3-D demo, raise ef, and step through layer 0: the text shows the best-ef list changing as the search explores.
+
+So `ef` is a dial between speed and accuracy, and you choose it per query, at search time, without rebuilding anything.
+
+## Why this is fast
+
+Here's the intuition for why HNSW scales so well. Each layer is about M times smaller than the one below, so the number of layers grows like the logarithm of the number of points. On each layer, the search starts close to the answer *at that layer's scale*, so it only needs a few hops before it has to drop down. A few hops on each of a logarithmic number of layers adds up to roughly logarithmic work overall, compared with brute force's linear work. The original paper measured this kind of scaling on large datasets.
+
+## Building the index
+
+There's no separate construction algorithm to learn: inserting a point is mostly a search. To insert a new point p:
+
+1. **Pick its level.** Draw `level = floor(-ln(U) × mL)`, where U is uniform on (0, 1] and `mL = 1 / ln(M)`. This makes each level about M times rarer than the one below it, which is exactly the layer sizes from the zoom-levels section.
+2. **Zoom in.** Starting at the entry point, greedily search down through the layers *above* p's level, as if p were a query.
+3. **Connect.** On each layer from p's level down to 0, run a beam search with `efConstruction` candidates to find points near p, choose up to M of them as neighbours, and add links in both directions. Two-way links matter: without them, nothing would ever route a search *to* p.
+4. **Prune.** If a neighbour now has too many links (more than M on upper layers, or 2M on layer 0), shrink its list back down. Layer 0 gets twice the budget because it does the final, precise part of every search.
+5. **Promote.** If p's level is higher than the current top layer, p becomes the new entry point.
+
+Notice what's missing: no rebalancing, no global reorganisation. Each point's level is drawn independently, and the right shape falls out of the randomness. That's why HNSW can keep accepting inserts while it serves queries.
+
+Step through it below. Larger, coloured points live on higher layers, and red lines are the links the newest point made. The bars count points per level, and the black tick on each shows the expected count.
+
+<BuildDemo n={300} />
+
+Try inserting one point at a time at the start, when links are long because the graph is empty, then again near the end, when the new point's links are short and local.
+
+## Idea 3: choose diverse neighbours
+
+Step 3 says "choose up to M of them as neighbours", and the obvious choice is the M closest. That breaks on clustered data. If a new point sits next to a dense cluster, its M closest candidates are all inside that cluster, and links towards the other clusters never get made. A search arriving at this point can't get out the other side.
+
+The HNSW paper uses a simple rule instead. Go through the candidates from closest to furthest, and keep a candidate only if it's closer to the new point than to every neighbour already kept. The reasoning: if a candidate is closer to an existing neighbour than to you, you can already reach it through that neighbour, so a direct link adds little. Spend the link budget on a direction you can't reach yet.
+
+Below, the green point is being inserted and the other points are its candidates. Switch between the two rules, and click to move the green point.
+
+<NeighbourSelect />
+
+With "keep the M closest", every link points into the nearest cluster. With the heuristic, the green point links into each cluster once, and the dashed lines show which kept neighbour made each skipped candidate redundant. The heuristic often keeps *fewer* than M links, and that's fine: those few links cover every direction.
+
+## Playing with the knobs
+
+That's the whole algorithm. HNSW has three main parameters:
+
+- **M** sets how many links each node gets. More links give better recall and more robust routing, at the cost of memory and more distance computations per hop.
+- **efConstruction** is the beam size while building. Larger values find better neighbours and so build a better graph, but builds get slower. Search speed doesn't change.
+- **efSearch** is the beam size at query time, the `ef` from earlier. It's the knob you turn at runtime to trade speed for recall.
+
+The playground builds a full index and runs 150 test queries against exact search. The chart shows how recall grows with efSearch for the current index, and the red dot is your current setting. Below it is layer 0 of the graph, with upper-layer points in blue.
+
+<Playground />
+
+Some things to try:
+
+- On clustered 2-D data with M = 4, toggle the neighbour heuristic and watch the graph and the recall change.
+- Push M down to 2 and see how far efSearch has to rise to make up for it.
+- Switch to random 32-D data. Recall drops at the same settings: in high dimensions, distances between random points bunch together, and the neighbourhood structure the graph relies on weakens. Real embeddings have far more structure than random noise, which is why HNSW works well on them.
+- Raise efConstruction and compare the build time against the change in recall.
+
+## The whole algorithm
+
+Here is everything from this post in one place. `greedy` is beam search with ef = 1.
+
+```text
+search(q, k, ef):
+    ep = entry point
+    for layer = top down to 1:
+        ep = greedy(q, ep, layer)
+    return best k of beam(q, ep, ef, layer 0)
+
+beam(q, entry, ef, layer):
+    candidates = [entry]           # measured, not yet explored; closest first
+    results    = [entry]           # best ef measured so far
+    while candidates is not empty:
+        c = remove closest from candidates
+        if dist(q, c) > dist(q, worst in results): stop
+        for each neighbour e of c on this layer, not yet visited:
+            if len(results) < ef or dist(q, e) < dist(q, worst in results):
+                add e to candidates and to results
+                if len(results) > ef: remove worst from results
+    return results
+
+insert(p):
+    level = floor(-ln(uniform(0, 1]) * mL)
+    ep = entry point
+    for layer = top down to level + 1:
+        ep = greedy(p, ep, layer)
+    for layer = min(level, top) down to 0:
+        W = beam(p, ep, efConstruction, layer)
+        neighbours = select_diverse(p, W, M)
+        link p and each neighbour both ways; prune any neighbour over its limit
+        ep = W
+    if level > top: entry point = p
+```
+
+## Where HNSW falls short
+
+HNSW is fast, but it isn't free:
+
+- **Memory.** Every node stores its links on every layer it belongs to, on top of the vector itself. At scale the graph can rival the vectors in size, which is why systems often pair HNSW with compressed (quantized) vectors.
+- **Deletes are awkward.** Removing a node can disconnect parts of the graph, so most implementations mark deleted nodes, skip them during search, and rebuild periodically.
+- **Builds take time.** Every insert is a search, so indexing millions of vectors is slow compared with querying them.
+- **No guarantees.** Recall is empirical. You measure it on your own data, the way the playground does.
+
+Even so, it's the default index in a lot of vector search systems, including hnswlib (the authors' library), FAISS, pgvector, Qdrant, Weaviate, Milvus, and Lucene, which powers Elasticsearch and OpenSearch.
+
+## Recap
+
+- Brute force is exact but measures every point.
+- A proximity graph lets greedy search skip most points, but it gets stuck in local minima and needs many hops on large graphs.
+- Stacking sparser copies of the graph as layers gives long-range links on top and precise links at the bottom, so a search takes a few hops per layer over a logarithmic number of layers.
+- Beam search with `ef` on layer 0 escapes local minima and gives you a runtime speed-accuracy dial.
+- Inserting is searching plus linking, with random levels instead of rebalancing.
+- Choosing diverse neighbours keeps the graph navigable on clustered data.
+
+## The code
+
+Every demo on this page runs the same implementation, [`src/lib/hnsw.js`](https://github.com/divyansh070/divyansh070.github.io/blob/main/src/lib/hnsw.js). It follows the paper's algorithms closely and records each step of a search so the demos can replay it.
+
+## Further reading
+
+- Yu. A. Malkov and D. A. Yashunin, [Efficient and robust approximate nearest neighbor search using Hierarchical Navigable Small World graphs](https://arxiv.org/abs/1603.09320). The original paper, later published in IEEE TPAMI.
+- Yu. Malkov et al., *Approximate nearest neighbor algorithm based on navigable small world graphs*, Information Systems, 2014. The flat NSW predecessor.
+- William Pugh, *Skip Lists: A Probabilistic Alternative to Balanced Trees*, Communications of the ACM, 1990.
+- [hnswlib](https://github.com/nmslib/hnswlib), the reference C++ implementation with Python bindings.

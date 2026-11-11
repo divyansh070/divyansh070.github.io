@@ -1,0 +1,183 @@
+---
+---
+<figure class="demo" data-play>
+  <div class="controls">
+    <label>Data
+      <select data-ds>
+        <option value="clustered" selected>Clustered 2-D</option>
+        <option value="uniform">Uniform 2-D</option>
+        <option value="gauss32">Random 32-D</option>
+      </select>
+    </label>
+    <label>Points
+      <select data-n>
+        <option value="500">500</option>
+        <option value="1000" selected>1,000</option>
+        <option value="2000">2,000</option>
+      </select>
+    </label>
+    <label><input type="checkbox" data-heur checked /> Neighbour heuristic</label>
+  </div>
+  <div class="controls">
+    <label>M <input type="range" min="2" max="24" value="4" data-m /> <output data-mval>4</output></label>
+    <label>efConstruction <input type="range" min="8" max="200" value="32" data-efc /> <output data-efcval>32</output></label>
+    <label>efSearch <input type="range" min="10" max="200" value="10" data-efs /> <output data-efsval>10</output></label>
+  </div>
+  <div class="stats">
+    <div class="stat"><b data-recall>–</b><span>recall@10</span></div>
+    <div class="stat"><b data-dc>–</b><span>distance computations per query</span></div>
+    <div class="stat"><b data-speed>–</b><span>less work than brute force</span></div>
+    <div class="stat"><b data-build>–</b><span>build time</span></div>
+  </div>
+  <svg viewBox="0 0 600 240" class="chart" data-chart role="img" aria-label="Recall against distance computations as efSearch grows"></svg>
+  <canvas class="plot" width="600" height="400" data-canvas aria-label="Layer 0 of the index"></canvas>
+  <figcaption><span data-msg>Building the index…</span></figcaption>
+</figure>
+
+<script>
+  import { HNSW } from '../../lib/hnsw.js';
+  import { mulberry32, randomPoints, clusteredPoints, gaussianVectors } from '../../lib/points.js';
+  import { el } from '../../lib/svg.js';
+
+  const SWEEP = [10, 16, 24, 32, 48, 64, 96, 128, 200];
+  const QUERIES = 150;
+  const K = 10;
+
+  document.querySelectorAll('[data-play]').forEach((root) => {
+    const $ = (s) => root.querySelector(s);
+    const ds = $('[data-ds]'), nSel = $('[data-n]'), heur = $('[data-heur]');
+    const m = $('[data-m]'), efc = $('[data-efc]'), efs = $('[data-efs]');
+    const chart = $('[data-chart]'), canvas = $('[data-canvas]'), msg = $('[data-msg]');
+    let data, queries, truth, index, sweep, buildMs, timer;
+
+    function makeData() {
+      const n = +nSel.value;
+      if (ds.value === 'uniform') {
+        data = randomPoints(n, 600, 400, mulberry32(1));
+        queries = randomPoints(QUERIES, 600, 400, mulberry32(2));
+      } else if (ds.value === 'clustered') {
+        const all = clusteredPoints(n + QUERIES, 600, 400, mulberry32(3));
+        data = all.slice(0, n);
+        queries = all.slice(n);
+      } else {
+        data = gaussianVectors(n, 32, mulberry32(4));
+        queries = gaussianVectors(QUERIES, 32, mulberry32(5));
+      }
+      const exact = new HNSW();
+      exact.points = data;
+      truth = queries.map((q) => new Set(exact.bruteForce(q, K).map((r) => r[1])));
+    }
+
+    function evaluate(ef) {
+      let recall = 0, dc = 0;
+      queries.forEach((q, i) => {
+        index.distCount = 0;
+        const res = index.search(q, K, ef);
+        dc += index.distCount;
+        recall += res.filter((r) => truth[i].has(r[1])).length / K;
+      });
+      return { ef, recall: recall / queries.length, dc: dc / queries.length };
+    }
+
+    function rebuild(newData) {
+      clearTimeout(timer);
+      msg.textContent = 'Building the index…';
+      timer = setTimeout(() => {
+        if (newData) makeData();
+        const t0 = performance.now();
+        index = new HNSW({ M: +m.value, efConstruction: +efc.value, heuristic: heur.checked });
+        data.forEach((p) => index.insert(p));
+        buildMs = performance.now() - t0;
+        sweep = SWEEP.map(evaluate);
+        drawGraph();
+        update();
+      }, 120);
+    }
+
+    function update() {
+      if (!index) return;
+      const cur = evaluate(+efs.value);
+      $('[data-recall]').textContent = `${(cur.recall * 100).toFixed(1)}%`;
+      $('[data-dc]').textContent = Math.round(cur.dc);
+      $('[data-speed]').textContent = `${(data.length / cur.dc).toFixed(1)}×`;
+      $('[data-build]').textContent = `${Math.round(buildMs)} ms`;
+      drawChart(cur);
+      msg.textContent = `${data.length.toLocaleString()} points in ${index.maxLevel + 1} layers, tested with ${QUERIES} queries against exact search.`
+        + (ds.value === 'gauss32' ? ' 32-D data can’t be drawn, so the graph view is hidden.' : '');
+    }
+
+    function drawChart(cur) {
+      chart.replaceChildren();
+      const W = 600, H = 240, L = 46, R = 18, T = 22, B = 40;
+      const pts = [...sweep, cur];
+      const maxX = Math.max(...pts.map((p) => p.dc)) * 1.08;
+      const minY = Math.min(9, Math.floor(Math.min(...pts.map((p) => p.recall)) * 10)) / 10;
+      const x = (v) => L + (v / maxX) * (W - L - R);
+      const y = (v) => T + (1 - (v - minY) / (1 - minY)) * (H - T - B);
+
+      el('line', { x1: L, y1: y(minY), x2: W - R, y2: y(minY), class: 'axis' }, chart);
+      el('line', { x1: L, y1: T, x2: L, y2: y(minY), class: 'axis' }, chart);
+      const steps = Math.round((1 - minY) * 10);
+      const every = steps > 5 ? 2 : 1;
+      for (let s = 0; s <= steps; s += every) {
+        const v = minY + s / 10;
+        el('line', { x1: L, y1: y(v), x2: W - R, y2: y(v), class: 'axis', opacity: 0.4 }, chart);
+        el('text', { x: L - 8, y: y(v) + 4, 'text-anchor': 'end' }, chart).textContent = v.toFixed(1);
+      }
+      for (let i = 0; i <= 4; i++) {
+        const v = (maxX * i) / 4;
+        el('text', { x: x(v), y: H - B + 18, 'text-anchor': 'middle' }, chart).textContent = Math.round(v);
+      }
+      el('text', { x: L, y: 12 }, chart).textContent = 'recall@10';
+      el('text', { x: W - R, y: H - 4, 'text-anchor': 'end' }, chart).textContent = 'distance computations per query';
+
+      el('polyline', { points: sweep.map((p) => `${x(p.dc)},${y(p.recall)}`).join(' '), class: 'curve' }, chart);
+      for (const p of sweep) {
+        const dot = el('circle', { cx: x(p.dc), cy: y(p.recall), r: 3, class: 'pt' }, chart);
+        el('title', {}, dot).textContent = `efSearch ${p.ef}: recall ${(p.recall * 100).toFixed(1)}%`;
+      }
+      el('circle', { cx: x(cur.dc), cy: y(cur.recall), r: 6, class: 'cur' }, chart);
+      const right = x(cur.dc) > W - 140;
+      el('text', { x: x(cur.dc) + (right ? -10 : 10), y: y(cur.recall) + 16, 'text-anchor': right ? 'end' : 'start' }, chart).textContent = `efSearch ${cur.ef}`;
+    }
+
+    function drawGraph() {
+      const flat = ds.value !== 'gauss32';
+      canvas.style.display = flat ? 'block' : 'none';
+      if (!flat) return;
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = 600 * dpr;
+      canvas.height = 400 * dpr;
+      const ctx = canvas.getContext('2d');
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const css = getComputedStyle(root);
+      ctx.clearRect(0, 0, 600, 400);
+      ctx.strokeStyle = css.getPropertyValue('--edge').trim();
+      ctx.lineWidth = 0.7;
+      ctx.beginPath();
+      for (const [a, b] of index.edges(0)) {
+        ctx.moveTo(data[a][0], data[a][1]);
+        ctx.lineTo(data[b][0], data[b][1]);
+      }
+      ctx.stroke();
+      const muted = css.getPropertyValue('--muted').trim();
+      const accent = css.getPropertyValue('--accent').trim();
+      data.forEach(([px, py], i) => {
+        const upper = index.levels[i] > 0;
+        ctx.fillStyle = upper ? accent : muted;
+        ctx.beginPath();
+        ctx.arc(px, py, upper ? 3 : 2, 0, Math.PI * 2);
+        ctx.fill();
+      });
+    }
+
+    ds.addEventListener('change', () => rebuild(true));
+    nSel.addEventListener('change', () => rebuild(true));
+    heur.addEventListener('change', () => rebuild(false));
+    for (const [input, outSel] of [[m, '[data-mval]'], [efc, '[data-efcval]']]) {
+      input.addEventListener('input', () => { $(outSel).textContent = input.value; rebuild(false); });
+    }
+    efs.addEventListener('input', () => { $('[data-efsval]').textContent = efs.value; update(); });
+    rebuild(true);
+  });
+</script>

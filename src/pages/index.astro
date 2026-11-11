@@ -1,16 +1,23 @@
 ---
+import BaseHead from '../components/BaseHead.astro';
+const posts = Object.values(import.meta.glob('./blog/*.mdx', { eager: true }));
 ---
-
 <html lang="en">
-	<head>
-		<meta charset="utf-8" />
-		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-		<link rel="icon" href="/favicon.ico" />
-		<meta name="viewport" content="width=device-width" />
-		<meta name="generator" content={Astro.generator} />
-		<title>Astro</title>
-	</head>
-	<body>
-		<h1>Astro</h1>
-	</body>
+  <head>
+    <BaseHead title="Interactive ML notes" description="Machine learning ideas explained with demos you can click, drag and break." />
+  </head>
+  <body>
+    <main>
+      <h1>Interactive ML notes</h1>
+      <p class="sub">Machine learning ideas explained with demos you can click, drag and break.</p>
+      <ul class="post-list">
+        {posts.map((p) => (
+          <li>
+            <a href={p.url}>{p.frontmatter.title}</a>
+            <span>{p.frontmatter.description}</span>
+          </li>
+        ))}
+      </ul>
+    </main>
+  </body>
 </html>

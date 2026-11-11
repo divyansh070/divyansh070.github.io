@@ -1,0 +1,121 @@
+---
+const { n = 300 } = Astro.props;
+---
+<figure class="demo" data-build data-n={n}>
+  <div class="controls">
+    <button type="button" data-step="1">Insert 1</button>
+    <button type="button" data-step="25">Insert 25</button>
+    <button type="button" data-step="all">Insert all</button>
+    <button type="button" data-reset>Reset</button>
+    <label>M <input type="range" min="2" max="8" value="4" data-m /> <output data-mval>4</output></label>
+  </div>
+  <svg viewBox="0 0 600 400" class="plot" role="img" aria-label="HNSW index being built one point at a time"></svg>
+  <figcaption>
+    <span data-msg>Press Insert 1 to add the first point.</span>
+    <span>Points: <b data-count>0</b> of {n}</span>
+  </figcaption>
+  <div class="bars" data-bars></div>
+</figure>
+
+<script>
+  import { HNSW } from '../../lib/hnsw.js';
+  import { mulberry32, randomPoints } from '../../lib/points.js';
+  import { el, line, sleep } from '../../lib/svg.js';
+
+  document.querySelectorAll('[data-build]').forEach((root) => {
+    const n = +root.dataset.n;
+    const svg = root.querySelector('svg');
+    const slider = root.querySelector('[data-m]');
+    const out = root.querySelector('[data-mval]');
+    const msg = root.querySelector('[data-msg]');
+    const count = root.querySelector('[data-count]');
+    const bars = root.querySelector('[data-bars]');
+    const pts = randomPoints(n, 600, 400, mulberry32(21));
+    let index;
+    let run = 0;
+
+    function draw(last) {
+      svg.replaceChildren();
+      const base = el('g', {}, svg);
+      const fresh = el('g', {}, svg);
+      for (const [a, b] of index.edges(0)) {
+        const isFresh = a === last || b === last;
+        line(isFresh ? fresh : base, index.points[a], index.points[b], isFresh ? 'edge fresh' : 'edge');
+      }
+      index.points.forEach(([x, y], i) => {
+        const lv = Math.min(index.levels[i], 3);
+        const cls = i === last ? 'node new' : lv === 0 ? 'node' : `node lvl-${lv}`;
+        el('circle', { cx: x, cy: y, r: 3 + lv * 1.6 + (i === last ? 1.5 : 0), class: cls }, svg);
+      });
+      count.textContent = index.points.length;
+      drawBars();
+    }
+
+    function drawBars() {
+      const total = index.points.length;
+      const M = index.M;
+      const top = Math.max(index.maxLevel, 2);
+      const counts = Array(top + 1).fill(0);
+      index.levels.forEach((lv) => counts[lv]++);
+      const expected = counts.map((_, l) => total * (M ** -l - M ** -(l + 1)));
+      const scale = Math.max(...counts, ...expected, 1);
+      bars.replaceChildren();
+      counts.forEach((c, l) => {
+        const label = document.createElement('span');
+        label.textContent = `Level ${l}`;
+        const track = document.createElement('div');
+        track.className = 'bar-track';
+        const bar = document.createElement('div');
+        bar.className = 'bar';
+        bar.style.width = `${(100 * c) / scale}%`;
+        const exp = document.createElement('div');
+        exp.className = 'bar-exp';
+        exp.style.left = `${(100 * expected[l]) / scale}%`;
+        track.append(bar, exp);
+        const value = document.createElement('span');
+        value.textContent = `${c} (expected ${expected[l].toFixed(1)})`;
+        bars.append(label, track, value);
+      });
+    }
+
+    function describe(id) {
+      const lv = index.levels[id];
+      if (id === 0) {
+        msg.textContent = 'The first point has nothing to link to, so it becomes the entry point.';
+        return;
+      }
+      const deg = index.links[id][0].length;
+      msg.textContent = lv === 0
+        ? `Point ${id + 1} got level 0, so it only lives on the bottom layer. It linked to ${deg} neighbours (red lines).`
+        : `Point ${id + 1} got level ${lv}, so it lives on layers 0 to ${lv} and is drawn larger. It linked to ${deg} neighbours on layer 0 (red lines).`;
+    }
+
+    function reset() {
+      run++;
+      out.textContent = slider.value;
+      index = new HNSW({ M: +slider.value, efConstruction: 32, seed: 5 });
+      draw(-1);
+      msg.textContent = 'Press Insert 1 to add the first point.';
+    }
+
+    async function insert(k) {
+      const id = ++run;
+      for (let i = 0; i < k && index.points.length < n; i++) {
+        const newId = index.insert(pts[index.points.length]);
+        if (k === 1 || i % 5 === 4 || index.points.length === n) {
+          draw(newId);
+          describe(newId);
+          if (k > 1) await sleep(40);
+          if (id !== run) return;
+        }
+      }
+    }
+
+    root.querySelectorAll('[data-step]').forEach((b) =>
+      b.addEventListener('click', () => insert(b.dataset.step === 'all' ? n : +b.dataset.step)),
+    );
+    root.querySelector('[data-reset]').addEventListener('click', reset);
+    slider.addEventListener('input', reset);
+    reset();
+  });
+</script>

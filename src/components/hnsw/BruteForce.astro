@@ -1,0 +1,58 @@
+---
+const { n = 400, k = 5 } = Astro.props;
+---
+<figure class="demo" data-brute data-n={n} data-k={k}>
+  <svg viewBox="0 0 600 400" class="plot" role="img" aria-label="Scatter plot. Click to run a brute-force nearest-neighbour search."></svg>
+  <figcaption>
+    <span data-msg>Click anywhere to drop a query point.</span>
+    <span>Distance computations: <b data-count>0</b> of {n}</span>
+  </figcaption>
+</figure>
+
+<script>
+  import { mulberry32, randomPoints } from '../../lib/points.js';
+  import { el, line, svgPoint, sleep } from '../../lib/svg.js';
+
+  document.querySelectorAll('[data-brute]').forEach((root) => {
+    const n = +root.dataset.n;
+    const k = +root.dataset.k;
+    const svg = root.querySelector('svg');
+    const count = root.querySelector('[data-count]');
+    const msg = root.querySelector('[data-msg]');
+    const pts = randomPoints(n, 600, 400, mulberry32(42));
+    const lines = el('g', {}, svg);
+    const dots = pts.map(([x, y]) => el('circle', { cx: x, cy: y, r: 3, class: 'node' }, svg));
+    const top = el('g', {}, svg);
+    let run = 0;
+
+    svg.addEventListener('click', async (e) => {
+      const q = svgPoint(svg, e);
+      const id = ++run;
+      lines.replaceChildren();
+      top.replaceChildren();
+      dots.forEach((d) => { d.setAttribute('class', 'node'); d.setAttribute('r', 3); });
+      el('circle', { cx: q[0], cy: q[1], r: 7, class: 'query' }, top);
+      msg.textContent = 'Measuring the distance to every point…';
+
+      const dist = [];
+      for (let i = 0; i < n; i++) {
+        dist.push(Math.hypot(pts[i][0] - q[0], pts[i][1] - q[1]));
+        dots[i].setAttribute('class', 'node visited');
+        if (i % 8 === 7) {
+          count.textContent = i + 1;
+          await sleep(16);
+          if (id !== run) return;
+        }
+      }
+      count.textContent = n;
+
+      const best = [...dist.keys()].sort((a, b) => dist[a] - dist[b]).slice(0, k);
+      for (const j of best) {
+        dots[j].setAttribute('class', 'node hit');
+        dots[j].setAttribute('r', 5);
+        line(lines, q, pts[j], 'hop');
+      }
+      msg.textContent = `Found the ${k} nearest neighbours, after measuring all ${n} points.`;
+    });
+  });
+</script>

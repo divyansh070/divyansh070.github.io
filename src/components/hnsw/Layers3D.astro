@@ -1,0 +1,321 @@
+---
+const { n = 300 } = Astro.props;
+---
+<figure class="demo" data-layers3d data-n={n}>
+  <div class="controls">
+    <button type="button" data-step>Next step</button>
+    <button type="button" data-play>Play</button>
+    <button type="button" data-random>New query</button>
+    <label>ef on layer 0 <input type="range" min="1" max="16" value="1" data-ef /> <output data-efval>1</output></label>
+  </div>
+  <div class="stage3d" data-stage></div>
+  <p class="narration" data-say aria-live="polite">Drag to rotate. Click any layer to place a query, then press Next step.</p>
+  <figcaption>
+    <span>Bottom plane is layer 0. Dashed vertical lines join copies of the same point.</span>
+    <span>Distance computations: <b data-count>0</b> of {n}</span>
+  </figcaption>
+</figure>
+
+<script>
+  import * as THREE from 'three';
+  import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+  import { HNSW } from '../../lib/hnsw.js';
+  import { buildSteps } from '../../lib/narrate.js';
+  import { mulberry32, randomPoints } from '../../lib/points.js';
+  import { sleep } from '../../lib/svg.js';
+
+  const GAP = 1.4;
+  const to3 = (p, l) => new THREE.Vector3((p[0] - 300) / 100, l * GAP, (p[1] - 200) / 100);
+
+  document.querySelectorAll('[data-layers3d]').forEach((root) => {
+    const n = +root.dataset.n;
+    const stage = root.querySelector('[data-stage]');
+    const say = root.querySelector('[data-say]');
+    const count = root.querySelector('[data-count]');
+    const efSlider = root.querySelector('[data-ef]');
+    const efOut = root.querySelector('[data-efval]');
+    const playBtn = root.querySelector('[data-play]');
+
+    let renderer;
+    try {
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    } catch {
+      say.textContent = 'Your browser couldn’t start WebGL, so the 3-D view is unavailable.';
+      return;
+    }
+
+    const css = getComputedStyle(document.documentElement);
+    const hex = (v) => css.getPropertyValue(v).trim();
+    const C = {
+      muted: new THREE.Color(hex('--muted')),
+      edge: new THREE.Color(hex('--edge')),
+      accent: new THREE.Color(hex('--accent')),
+      hit: new THREE.Color(hex('--hit')),
+      ok: new THREE.Color(hex('--ok')),
+      violet: new THREE.Color(hex('--violet')),
+      border: new THREE.Color(hex('--border')),
+    };
+
+    const pts = randomPoints(n, 600, 400, mulberry32(8));
+    const index = new HNSW({ M: 4, efConstruction: 32, seed: 11 });
+    pts.forEach((p) => index.insert(p));
+    const top = index.maxLevel;
+
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    stage.appendChild(renderer.domElement);
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(38, 4 / 3, 0.1, 100);
+    camera.position.set(6.5, top * GAP + 4.5, 7.5);
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(0, (top * GAP) / 2 - 0.3, 0);
+    controls.enableDamping = true;
+    controls.enableZoom = false;
+    controls.enablePan = false;
+    controls.update();
+
+    function resize() {
+      const w = stage.clientWidth, h = stage.clientHeight;
+      if (!w || !h) return;
+      renderer.setSize(w, h, false);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+    }
+    new ResizeObserver(resize).observe(stage);
+    resize();
+
+    const lineGeo = (a, b) => new THREE.BufferGeometry().setFromPoints([a, b]);
+    const segments = (pairs, material) => {
+      const arr = [];
+      for (const [a, b] of pairs) arr.push(a.x, a.y, a.z, b.x, b.y, b.z);
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute(arr, 3));
+      return new THREE.LineSegments(g, material);
+    };
+
+    function label(text, pos) {
+      const c = document.createElement('canvas');
+      c.width = 256; c.height = 64;
+      const g = c.getContext('2d');
+      g.font = '500 30px "IBM Plex Sans", system-ui, sans-serif';
+      g.fillStyle = hex('--soft');
+      g.fillText(text, 6, 42);
+      const tex = new THREE.CanvasTexture(c);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false }));
+      s.position.copy(pos);
+      s.scale.set(1.3, 0.325, 1);
+      return s;
+    }
+
+    // Layer planes, outlines, labels and links.
+    const planes = [];
+    for (let l = 0; l <= top; l++) {
+      const geo = new THREE.PlaneGeometry(6.4, 4.4);
+      const plane = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+        color: C.accent, transparent: true, opacity: l === 0 ? 0.06 : 0.04, side: THREE.DoubleSide, depthWrite: false,
+      }));
+      plane.rotation.x = -Math.PI / 2;
+      plane.position.y = l * GAP;
+      plane.userData.layer = l;
+      scene.add(plane);
+      planes.push(plane);
+      const outline = new THREE.LineSegments(new THREE.EdgesGeometry(geo), new THREE.LineBasicMaterial({ color: C.border }));
+      outline.rotation.x = -Math.PI / 2;
+      outline.position.y = l * GAP;
+      scene.add(outline);
+      const nodes = index.nodesAt(l).length;
+      scene.add(label(`Layer ${l}: ${nodes} pts`, new THREE.Vector3(-3.0, l * GAP + 0.15, -2.4)));
+      const pairs = index.edges(l).map(([a, b]) => [to3(pts[a], l), to3(pts[b], l)]);
+      scene.add(segments(pairs, new THREE.LineBasicMaterial({ color: l === 0 ? C.edge : C.muted, transparent: true, opacity: l === 0 ? 0.55 : 0.75 })));
+    }
+
+    // Dashed pillars joining each point's copies across layers.
+    const pillarPairs = [];
+    index.levels.forEach((lv, i) => { if (lv > 0) pillarPairs.push([to3(pts[i], 0), to3(pts[i], lv)]); });
+    const pillars = segments(pillarPairs, new THREE.LineDashedMaterial({ color: C.muted, dashSize: 0.06, gapSize: 0.06, transparent: true, opacity: 0.6 }));
+    pillars.computeLineDistances();
+    scene.add(pillars);
+
+    // Nodes: one instanced mesh per layer so each copy can be coloured on its own.
+    const sphere = new THREE.SphereGeometry(1, 12, 8);
+    const layers = [];
+    const m4 = new THREE.Matrix4();
+    for (let l = 0; l <= top; l++) {
+      const ids = index.nodesAt(l);
+      const size = l === 0 ? 0.035 : 0.06;
+      const mesh = new THREE.InstancedMesh(sphere, new THREE.MeshBasicMaterial(), ids.length);
+      const slot = new Map();
+      ids.forEach((id, i) => {
+        slot.set(id, i);
+        m4.makeScale(size, size, size).setPosition(to3(pts[id], l));
+        mesh.setMatrixAt(i, m4);
+        mesh.setColorAt(i, C.muted);
+      });
+      mesh.instanceColor.needsUpdate = true;
+      scene.add(mesh);
+      layers.push({ mesh, slot, size });
+    }
+
+    function paint(l, id, color, grow = 1) {
+      const L = layers[l];
+      const i = L.slot.get(id);
+      if (i === undefined) return;
+      const s = L.size * grow;
+      m4.makeScale(s, s, s).setPosition(to3(pts[id], l));
+      L.mesh.setMatrixAt(i, m4);
+      L.mesh.setColorAt(i, color);
+      L.mesh.instanceMatrix.needsUpdate = true;
+      L.mesh.instanceColor.needsUpdate = true;
+    }
+
+    function resetPaint() {
+      layers.forEach((L, l) => L.slot.forEach((_, id) => paint(l, id, C.muted, 1)));
+    }
+
+    const marks = new THREE.Group();
+    scene.add(marks);
+    const clearMarks = () => {
+      marks.children.forEach((o) => o.geometry?.dispose());
+      marks.clear();
+    };
+    const addLine = (a, b, color, opacity = 1, dashed = false) => {
+      const mat = dashed
+        ? new THREE.LineDashedMaterial({ color, dashSize: 0.08, gapSize: 0.06, transparent: true, opacity })
+        : new THREE.LineBasicMaterial({ color, transparent: true, opacity });
+      const line = new THREE.Line(lineGeo(a, b), mat);
+      if (dashed) line.computeLineDistances();
+      marks.add(line);
+    };
+
+    // State for the current query.
+    let q = null, steps = [], at = 0, c = 0, run = 0, playing = false;
+    let lastExpand = new Map();
+    let answer = null, truth = null;
+
+    function setQuery(point) {
+      run++;
+      stopPlay();
+      q = point;
+      clearMarks();
+      resetPaint();
+      count.textContent = c = 0;
+      at = 0;
+      lastExpand = new Map();
+      const ef = +efSlider.value;
+      const trace = [];
+      answer = index.search(q, 1, ef, trace)[0];
+      truth = index.bruteForce(q, 1)[0];
+      steps = buildSteps(trace, ef);
+      const ringGeo = new THREE.RingGeometry(0.08, 0.12, 24);
+      for (let l = 0; l <= top; l++) {
+        const ring = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({ color: C.hit, side: THREE.DoubleSide }));
+        ring.rotation.x = -Math.PI / 2;
+        ring.position.copy(to3(q, l)).add(new THREE.Vector3(0, 0.005, 0));
+        marks.add(ring);
+      }
+      addLine(to3(q, 0), to3(q, top), C.hit, 0.35, true);
+      say.textContent = `New query placed (red rings). The search will take ${steps.length} steps across ${top + 1} layers. Press Next step or Play.`;
+    }
+
+    async function step() {
+      if (!q) return;
+      if (at >= steps.length) {
+        say.textContent = 'Search finished. Click a layer or press New query to try again.';
+        return;
+      }
+      const id = run;
+      const s = steps[at++];
+      say.textContent = `Step ${at} of ${steps.length}. ${s.text}`;
+      for (const ev of s.events) {
+        if (id !== run) return;
+        const l = ev.layer;
+        if (ev.type === 'visit') {
+          count.textContent = ++c;
+          if (ev.from === null) {
+            paint(l, ev.id, C.ok, 1.8);
+            if (l < top) addLine(to3(pts[ev.id], l + 1), to3(pts[ev.id], l), C.hit, 0.9, true);
+          } else {
+            addLine(to3(pts[ev.from], l), to3(pts[ev.id], l), C.accent, 0.7);
+            paint(l, ev.id, C.accent, 1.3);
+          }
+          await sleep(60);
+        } else {
+          const prev = lastExpand.get(l);
+          const pathLike = l > 0 || +efSlider.value === 1;
+          if (prev !== undefined && prev !== ev.id) {
+            if (pathLike) {
+              addLine(to3(pts[prev], l), to3(pts[ev.id], l), C.hit, 1);
+              paint(l, prev, C.accent, 1.3);
+            } else {
+              paint(l, prev, C.violet, 1.6);
+            }
+          }
+          lastExpand.set(l, ev.id);
+          paint(l, ev.id, C.hit, 2);
+        }
+      }
+      if (at === steps.length) {
+        paint(0, answer[1], C.hit, 2.4);
+        if (answer[1] !== truth[1]) {
+          const ring = new THREE.Mesh(new THREE.RingGeometry(0.1, 0.14, 24), new THREE.MeshBasicMaterial({ color: C.ok, side: THREE.DoubleSide }));
+          ring.rotation.x = -Math.PI / 2;
+          ring.position.copy(to3(pts[truth[1]], 0)).add(new THREE.Vector3(0, 0.01, 0));
+          marks.add(ring);
+          say.textContent += ` Brute force says the true nearest point is ${Math.round(truth[0])} away (green ring), so this search missed it. Raise ef and try the same query again.`;
+        } else {
+          say.textContent += ` That matches brute force, using ${c} distance computations instead of ${n}.`;
+        }
+      }
+    }
+
+    function stopPlay() {
+      playing = false;
+      playBtn.textContent = 'Play';
+    }
+    async function play() {
+      if (playing) { stopPlay(); return; }
+      if (!q || at >= steps.length) setQuery(q ?? randomQuery());
+      playing = true;
+      playBtn.textContent = 'Pause';
+      const id = run;
+      while (playing && id === run && at < steps.length) {
+        await step();
+        await sleep(1600);
+      }
+      if (id === run) stopPlay();
+    }
+
+    const qrand = mulberry32(31);
+    const randomQuery = () => [30 + qrand() * 540, 30 + qrand() * 340];
+
+    // Click (not drag) on a layer to place a query there.
+    const ray = new THREE.Raycaster();
+    let down = null;
+    renderer.domElement.addEventListener('pointerdown', (e) => { down = [e.clientX, e.clientY]; });
+    renderer.domElement.addEventListener('pointerup', (e) => {
+      if (!down || Math.hypot(e.clientX - down[0], e.clientY - down[1]) > 5) return;
+      const r = renderer.domElement.getBoundingClientRect();
+      const ndc = new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+      ray.setFromCamera(ndc, camera);
+      const hit = ray.intersectObjects(planes)[0];
+      if (!hit) return;
+      const x = Math.min(588, Math.max(12, hit.point.x * 100 + 300));
+      const y = Math.min(388, Math.max(12, hit.point.z * 100 + 200));
+      setQuery([x, y]);
+    });
+
+    root.querySelector('[data-step]').addEventListener('click', () => { stopPlay(); step(); });
+    playBtn.addEventListener('click', play);
+    root.querySelector('[data-random]').addEventListener('click', () => setQuery(randomQuery()));
+    efSlider.addEventListener('input', () => {
+      efOut.textContent = efSlider.value;
+      if (q) setQuery(q);
+    });
+
+    // Only render while the demo is on screen.
+    const loop = () => { controls.update(); renderer.render(scene, camera); };
+    new IntersectionObserver(([entry]) => renderer.setAnimationLoop(entry.isIntersecting ? loop : null)).observe(stage);
+
+    setQuery(randomQuery());
+  });
+</script>

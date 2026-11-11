@@ -1,0 +1,101 @@
+---
+const { n = 250 } = Astro.props;
+---
+<figure class="demo" data-greedy data-n={n}>
+  <div class="controls">
+    <label>M <input type="range" min="1" max="8" value="2" data-m /> <output data-mval>2</output></label>
+    <button type="button" data-random>Random query</button>
+  </div>
+  <svg viewBox="0 0 600 400" class="plot" role="img" aria-label="Proximity graph. Click to run a greedy search."></svg>
+  <figcaption>
+    <span data-msg>Click anywhere. The search starts at the green node.</span>
+    <span>Distance computations: <b data-count>0</b> of {n}</span>
+  </figcaption>
+</figure>
+
+<script>
+  import { HNSW } from '../../lib/hnsw.js';
+  import { mulberry32, randomPoints } from '../../lib/points.js';
+  import { el, line, svgPoint, sleep } from '../../lib/svg.js';
+
+  document.querySelectorAll('[data-greedy]').forEach((root) => {
+    const n = +root.dataset.n;
+    const svg = root.querySelector('svg');
+    const slider = root.querySelector('[data-m]');
+    const out = root.querySelector('[data-mval]');
+    const msg = root.querySelector('[data-msg]');
+    const count = root.querySelector('[data-count]');
+    const pts = randomPoints(n, 600, 400, mulberry32(3));
+    const qrand = mulberry32(17);
+    let index, dots, paths, top;
+    let run = 0;
+
+    function resetMarks() {
+      paths.replaceChildren();
+      top.replaceChildren();
+      dots.forEach((d, i) => {
+        const entry = i === index.entry;
+        d.setAttribute('class', entry ? 'node entry' : 'node');
+        d.setAttribute('r', entry ? 6 : 3);
+      });
+      count.textContent = 0;
+    }
+
+    function build() {
+      run++;
+      const M = +slider.value;
+      out.textContent = M;
+      // mL = 0 puts every point on layer 0: a flat navigable small world graph.
+      index = new HNSW({ M, efConstruction: 16, heuristic: false, mL: 0 });
+      pts.forEach((p) => index.insert(p));
+      svg.replaceChildren();
+      const edges = el('g', {}, svg);
+      for (const [a, b] of index.edges(0)) line(edges, pts[a], pts[b], 'edge');
+      paths = el('g', {}, svg);
+      dots = pts.map(([x, y]) => el('circle', { cx: x, cy: y, r: 3, class: 'node' }, svg));
+      top = el('g', {}, svg);
+      resetMarks();
+      msg.textContent = 'Click anywhere. The search starts at the green node.';
+    }
+
+    async function query(q) {
+      const id = ++run;
+      resetMarks();
+      el('circle', { cx: q[0], cy: q[1], r: 7, class: 'query' }, top);
+      const trace = [];
+      const found = index.search(q, 1, 1, trace)[0][1];
+      const truth = index.bruteForce(q, 1)[0][1];
+      let c = 0;
+      let prev = null;
+      msg.textContent = 'Hopping towards the query…';
+
+      for (const ev of trace) {
+        if (ev.type === 'visit') {
+          count.textContent = ++c;
+          if (ev.from !== null) line(paths, pts[ev.from], pts[ev.id], 'probe');
+          if (ev.id !== index.entry) dots[ev.id].setAttribute('class', 'node visited');
+          await sleep(30);
+        } else {
+          if (prev !== null) line(paths, pts[prev], pts[ev.id], 'hop');
+          prev = ev.id;
+          await sleep(260);
+        }
+        if (id !== run) return;
+      }
+
+      dots[found].setAttribute('class', 'node hit');
+      dots[found].setAttribute('r', 5);
+      if (found === truth) {
+        msg.textContent = `Found the true nearest neighbour with ${c} distance computations instead of ${n}.`;
+      } else {
+        el('circle', { cx: pts[truth][0], cy: pts[truth][1], r: 9, class: 'truth' }, top);
+        msg.textContent = 'Stuck in a local minimum: no neighbour of the red node is closer, but the true nearest neighbour (green ring) is elsewhere. Try a higher M.';
+      }
+    }
+
+    slider.addEventListener('input', build);
+    svg.addEventListener('click', (e) => query(svgPoint(svg, e)));
+    root.querySelector('[data-random]').addEventListener('click', () => query([12 + qrand() * 576, 12 + qrand() * 376]));
+    build();
+  });
+</script>

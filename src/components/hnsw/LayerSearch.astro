@@ -1,0 +1,121 @@
+---
+const { n = 300 } = Astro.props;
+---
+<figure class="demo" data-layers data-n={n}>
+  <div class="controls">
+    <label>ef on layer 0 <input type="range" min="1" max="32" value="4" data-ef /> <output data-efval>4</output></label>
+    <button type="button" data-random>Random query</button>
+  </div>
+  <div class="layers" data-grid></div>
+  <figcaption>
+    <span data-msg>Click inside any layer to search. The walk starts on the top layer and drops down whenever it can't get closer.</span>
+    <span>Distance computations: <b data-count>0</b> of {n}</span>
+  </figcaption>
+</figure>
+
+<script>
+  import { HNSW } from '../../lib/hnsw.js';
+  import { mulberry32, randomPoints } from '../../lib/points.js';
+  import { el, line, svgPoint, sleep } from '../../lib/svg.js';
+
+  document.querySelectorAll('[data-layers]').forEach((root) => {
+    const n = +root.dataset.n;
+    const grid = root.querySelector('[data-grid]');
+    const efSlider = root.querySelector('[data-ef]');
+    const efOut = root.querySelector('[data-efval]');
+    const msg = root.querySelector('[data-msg]');
+    const count = root.querySelector('[data-count]');
+    const pts = randomPoints(n, 600, 400, mulberry32(8));
+    const qrand = mulberry32(23);
+    const index = new HNSW({ M: 4, efConstruction: 32, seed: 11 });
+    pts.forEach((p) => index.insert(p));
+    const panels = [];
+    let run = 0;
+
+    for (let l = index.maxLevel; l >= 0; l--) {
+      const nodes = index.nodesAt(l);
+      const wrap = document.createElement('div');
+      const title = document.createElement('div');
+      title.className = 'layer-title';
+      title.textContent = l === 0 ? `Layer 0: all ${nodes.length} points` : `Layer ${l}: ${nodes.length} point${nodes.length === 1 ? '' : 's'}`;
+      const svg = el('svg', { viewBox: '0 0 600 400', class: 'plot', role: 'img', 'aria-label': `Layer ${l} of the HNSW graph` });
+      wrap.append(title, svg);
+      grid.append(wrap);
+
+      if (l > 0) pts.forEach(([x, y]) => el('circle', { cx: x, cy: y, r: 2, class: 'ghost' }, svg));
+      const edges = el('g', {}, svg);
+      for (const [a, b] of index.edges(l)) line(edges, pts[a], pts[b], 'edge');
+      const paths = el('g', {}, svg);
+      const r = l ? 4.5 : 3;
+      const dots = new Map(nodes.map((i) => [i, el('circle', { cx: pts[i][0], cy: pts[i][1], r, class: 'node' }, svg)]));
+      const top = el('g', {}, svg);
+      panels[l] = { dots, paths, top, r };
+      svg.addEventListener('click', (e) => query(svgPoint(svg, e)));
+    }
+
+    function reset() {
+      count.textContent = 0;
+      for (const p of panels) {
+        p.paths.replaceChildren();
+        p.top.replaceChildren();
+        p.dots.forEach((d) => { d.setAttribute('class', 'node'); d.setAttribute('r', p.r); });
+      }
+    }
+
+    async function query(q) {
+      const id = ++run;
+      reset();
+      panels.forEach((p) => el('circle', { cx: q[0], cy: q[1], r: 7, class: 'query' }, p.top));
+      const ef = +efSlider.value;
+      const trace = [];
+      const found = index.search(q, 1, ef, trace)[0][1];
+      const truth = index.bruteForce(q, 1)[0][1];
+      let c = 0;
+      let prev = null;
+      let layer = null;
+
+      for (const ev of trace) {
+        const p = panels[ev.layer];
+        if (ev.layer !== layer) {
+          layer = ev.layer;
+          prev = null;
+          msg.textContent = `Searching layer ${layer}…`;
+          await sleep(350);
+        }
+        const isPath = ev.layer > 0 || ef === 1; // with ef > 1, layer 0 expands a frontier, not a single path
+        if (ev.type === 'visit') {
+          count.textContent = ++c;
+          const dot = p.dots.get(ev.id);
+          if (ev.from === null) {
+            dot.setAttribute('class', 'node entry');
+            dot.setAttribute('r', p.r + 2);
+          } else {
+            line(p.paths, pts[ev.from], pts[ev.id], 'probe');
+            if (dot.getAttribute('class') !== 'node entry') dot.setAttribute('class', 'node visited');
+          }
+          await sleep(25);
+        } else {
+          if (isPath && prev !== null) line(p.paths, pts[prev], pts[ev.id], 'hop');
+          if (!isPath) p.dots.get(ev.id).setAttribute('r', p.r + 1.5);
+          prev = ev.id;
+          await sleep(isPath ? 220 : 90);
+        }
+        if (id !== run) return;
+      }
+
+      const bottom = panels[0];
+      bottom.dots.get(found).setAttribute('class', 'node hit');
+      bottom.dots.get(found).setAttribute('r', 5.5);
+      const summary = `${index.maxLevel + 1} layers, ${c} distance computations (brute force needs ${n}).`;
+      if (found === truth) {
+        msg.textContent = `${summary} Found the true nearest neighbour.`;
+      } else {
+        el('circle', { cx: pts[truth][0], cy: pts[truth][1], r: 9, class: 'truth' }, bottom.top);
+        msg.textContent = `${summary} Missed the true nearest neighbour (green ring). Try a bigger ef.`;
+      }
+    }
+
+    efSlider.addEventListener('input', () => { efOut.textContent = efSlider.value; });
+    root.querySelector('[data-random]').addEventListener('click', () => query([12 + qrand() * 576, 12 + qrand() * 376]));
+  });
+</script>

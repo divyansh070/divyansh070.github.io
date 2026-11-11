@@ -1,0 +1,80 @@
+---
+---
+<figure class="demo" data-select>
+  <div class="controls">
+    <label>Rule
+      <select data-rule>
+        <option value="simple">Keep the M closest</option>
+        <option value="heuristic">Diversity heuristic</option>
+      </select>
+    </label>
+    <label>M <input type="range" min="1" max="8" value="4" data-m /> <output data-mval>4</output></label>
+  </div>
+  <svg viewBox="0 0 600 400" class="plot" role="img" aria-label="Neighbour selection for a new point. Click to move the new point."></svg>
+  <figcaption><span data-msg></span></figcaption>
+</figure>
+
+<script>
+  import { mulberry32, gaussian } from '../../lib/points.js';
+  import { el, line, svgPoint } from '../../lib/svg.js';
+
+  document.querySelectorAll('[data-select]').forEach((root) => {
+    const svg = root.querySelector('svg');
+    const rule = root.querySelector('[data-rule]');
+    const slider = root.querySelector('[data-m]');
+    const out = root.querySelector('[data-mval]');
+    const msg = root.querySelector('[data-msg]');
+
+    // Four clusters in different directions from the new point.
+    const rand = mulberry32(12);
+    const clusters = [[385, 215, 22, 16], [150, 230, 20, 9], [280, 70, 20, 9], [300, 360, 20, 9]];
+    const pts = [];
+    clusters.forEach(([cx, cy, spread, count], c) => {
+      for (let i = 0; i < count; i++) pts.push({ x: cx + gaussian(rand) * spread, y: cy + gaussian(rand) * spread, c });
+    });
+    let base = [285, 215];
+    const d = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+
+    function draw() {
+      const M = +slider.value;
+      out.textContent = M;
+      const cands = pts.map((p, i) => ({ i, d: d(base, [p.x, p.y]) })).sort((a, b) => a.d - b.d);
+      const chosen = [];
+      const blocked = [];
+      if (rule.value === 'simple') {
+        chosen.push(...cands.slice(0, M).map((c) => c.i));
+      } else {
+        for (const cand of cands) {
+          if (chosen.length >= M) break;
+          const p = [pts[cand.i].x, pts[cand.i].y];
+          const blocker = chosen.find((r) => d(p, [pts[r].x, pts[r].y]) < cand.d);
+          if (blocker === undefined) chosen.push(cand.i);
+          else blocked.push([cand.i, blocker]);
+        }
+      }
+
+      svg.replaceChildren();
+      const g = el('g', {}, svg);
+      for (const [i, r] of blocked) {
+        el('line', { x1: pts[i].x, y1: pts[i].y, x2: pts[r].x, y2: pts[r].y, class: 'probe', 'stroke-dasharray': '3 3' }, g);
+      }
+      for (const i of chosen) line(g, base, [pts[i].x, pts[i].y], 'hop');
+      const blockedSet = new Set(blocked.map((b) => b[0]));
+      pts.forEach((p, i) => {
+        const cls = chosen.includes(i) ? 'node hit' : blockedSet.has(i) ? 'node visited' : 'node';
+        el('circle', { cx: p.x, cy: p.y, r: chosen.includes(i) ? 5 : 3.5, class: cls }, svg);
+      });
+      el('circle', { cx: base[0], cy: base[1], r: 8, class: 'node entry' }, svg);
+
+      const reached = new Set(chosen.map((i) => pts[i].c)).size;
+      msg.textContent = rule.value === 'simple'
+        ? `The ${M} closest candidates give links into ${reached} of 4 clusters. Click to move the new point (green).`
+        : `Kept ${chosen.length} links reaching ${reached} of 4 clusters. ${blocked.length} closer candidates (blue) were skipped, because a kept neighbour was closer to them than the new point was (dashed line). Click to move the new point.`;
+    }
+
+    svg.addEventListener('click', (e) => { base = svgPoint(svg, e); draw(); });
+    rule.addEventListener('change', draw);
+    slider.addEventListener('input', draw);
+    draw();
+  });
+</script>
